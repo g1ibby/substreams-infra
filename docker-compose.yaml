@@ -1,0 +1,100 @@
+version: '3.1'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: substreams-infra-postgres
+    command:
+        - postgres
+        - -cshared_preload_libraries=pg_stat_statements
+    environment:
+        POSTGRES_DB: substreams
+        POSTGRES_HOST_AUTH_METHOD: md5
+        POSTGRES_INITDB_ARGS: -E UTF8 --locale=C
+        POSTGRES_PASSWORD: insecure-change-me-in-prod
+        POSTGRES_USER: dev-node
+    healthcheck:
+        test:
+            - CMD
+            - pg_isready
+            - -U
+            - dev-node
+            - -d
+            - substreams
+        timeout: 4s
+        interval: 5s
+        retries: 10
+    ports:
+        - target: 5432
+          published: 5432
+    restart: on-failure
+    volumes:
+        - type: bind
+          source: ./data/postgres
+          target: /var/lib/postgresql/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    container_name: substreams-infra-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      CLICKHOUSE_DB: substreams
+      CLICKHOUSE_USER: dev-node
+      CLICKHOUSE_PASSWORD: insecure-change-me-in-prod
+
+  pgweb:
+      image: sosedoff/pgweb:latest
+      container_name: substreams-infra-pgweb
+      command:
+          - pgweb
+          - --bind=0.0.0.0
+          - --listen=8081
+          - --binary-codec=hex
+      depends_on:
+          - postgres
+      environment:
+          DATABASE_URL: postgres://dev-node:insecure-change-me-in-prod@postgres:5432/substreams?sslmode=disable
+      ports:
+          - target: 8081
+            published: 8081
+      restart: on-failure
+
+  hasura:
+    image: hasura/graphql-engine:v2.38.0
+    container_name: substreams-infra-hasura
+    ports:
+      - "8080:8080"
+    depends_on:
+      data-connector-agent:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: on-failure 
+    environment:
+      HASURA_GRAPHQL_DATABASE_URL: postgres://dev-node:insecure-change-me-in-prod@postgres:5432/substreams?sslmode=disable
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+      HASURA_GRAPHQL_DEV_MODE: "true"
+      HASURA_GRAPHQL_ENABLED_LOG_TYPES: startup, http-log, webhook-log, websocket-log, query-log
+      HASURA_GRAPHQL_METADATA_DEFAULTS: '{"backend_configs":{"dataconnector":{"clickhouse":{"uri":"http://data-connector-agent:8080"}}}}'
+    volumes:
+      - ./data/hasura:/hasura-metadata
+
+  data-connector-agent:
+    image: hasura/clickhouse-data-connector:v2.38.0
+    restart: always
+    ports:
+      - 8082:8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 5s
